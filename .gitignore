@@ -1,9 +1,17 @@
 __pycache__/
 *.pyc
-.env
 venv/
 .idea/
 .vscode/
 *.log
 model/*.pkl
 !model/.gitkeep
+# Локальные настройки и секреты
+.env
+.env.*
+!.env.example
+app/config.env
+
+# Закрытые ключи и резервные копии
+*.key
+*.dump
