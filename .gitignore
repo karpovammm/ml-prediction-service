@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 venv/
+.venv/
 .idea/
 .vscode/
 *.log
@@ -15,3 +16,5 @@ app/config.env
 # Закрытые ключи и резервные копии
 *.key
 *.dump
+data/*.csv
+data/*.zip
