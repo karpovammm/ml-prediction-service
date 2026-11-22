@@ -1,18 +1,15 @@
-# Docker Compose configuration
 services:
   app:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-
-    image: ml-app:diabetes-v1
+    image: ghcr.io/karpovammm/ml-prediction-service/ml-app:${IMAGE_TAG:?IMAGE_TAG is required}
     container_name: ml-app
-
     ports:
       - "5000:5000"
-
-    env_file:
-      - path: ../.env
-        format: raw
-
+    environment:
+      DB_HOST: "10.10.10.11"
+      DB_PORT: "5432"
+      DB_NAME: ml_predictions
+      DB_USER: ml_app
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_SSLMODE: require
+      MODEL_PATH: /model/model.pkl
     restart: unless-stopped
