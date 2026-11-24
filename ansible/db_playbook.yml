@@ -1,0 +1,132 @@
+---
+- name: Configure PostgreSQL for the Diabetes service
+  hosts: db
+  gather_facts: false
+
+  vars:
+    db_password: "{{ lookup('env', 'LAB6_DB_PASSWORD') }}"
+    db_ip: "{{ hostvars[groups['db'][0]].ansible_host }}"
+    app_ip: "{{ hostvars[groups['app'][0]].ansible_host }}"
+
+  tasks:
+    - name: Check that the database password is available
+      ansible.builtin.assert:
+        that: db_password | length > 0
+        fail_msg: "Set LAB6_DB_PASSWORD on the controller."
+      no_log: true
+
+    - name: Install PostgreSQL and its Python driver
+      ansible.builtin.apt:
+        name:
+          - postgresql-14
+          - postgresql-contrib
+          - python3-psycopg2
+          - ssl-cert
+          - acl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Enable and start PostgreSQL
+      ansible.builtin.service:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Configure listening addresses and SSL
+      ansible.builtin.copy:
+        dest: /etc/postgresql/14/main/conf.d/90-lab6.conf
+        mode: "0644"
+        content: |
+          listen_addresses = 'localhost,{{ db_ip }}'
+          ssl = on
+          password_encryption = 'scram-sha-256'
+      notify: Restart database cluster
+
+    - name: Restrict remote access to the laboratory database
+      ansible.builtin.blockinfile:
+        path: /etc/postgresql/14/main/pg_hba.conf
+        insertbefore: BOF
+        marker: "# {mark} LAB6 APP ACCESS"
+        block: |
+          hostssl ml_predictions ml_app {{ app_ip }}/32 scram-sha-256
+          host    ml_predictions all    0.0.0.0/0       reject
+          host    ml_predictions all    ::/0            reject
+      notify: Restart database cluster
+
+    - name: Apply configuration before creating database objects
+      ansible.builtin.meta: flush_handlers
+
+    - name: Prepare the database and its privileges
+      become: true
+      become_user: postgres
+      block:
+        - name: Create application login
+          community.postgresql.postgresql_user:
+            name: ml_app
+            password: "{{ db_password }}"
+            role_attr_flags: LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION,NOBYPASSRLS,NOINHERIT
+            no_password_changes: true
+          no_log: true
+
+        - name: Create database owned by postgres
+          community.postgresql.postgresql_db:
+            name: ml_predictions
+            owner: postgres
+
+        - name: Check whether the predictions table exists
+          community.postgresql.postgresql_query:
+            db: ml_predictions
+            query: "SELECT to_regclass('public.predictions') IS NOT NULL AS present"
+          register: prediction_table
+          changed_when: false
+
+        - name: Create the predictions table
+          community.postgresql.postgresql_query:
+            db: ml_predictions
+            query: |
+              CREATE TABLE public.predictions (
+                id SERIAL PRIMARY KEY,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                input_data JSONB NOT NULL,
+                prediction JSONB NOT NULL,
+                model_version VARCHAR(50) NOT NULL
+              )
+          when: not prediction_table.query_result[0].present
+
+        - name: Revoke public database privileges
+          community.postgresql.postgresql_privs:
+            db: ml_predictions
+            type: database
+            objs: ml_predictions
+            roles: PUBLIC
+            privs: ALL
+            state: absent
+
+        - name: Revoke public schema privileges
+          community.postgresql.postgresql_privs:
+            db: ml_predictions
+            type: schema
+            objs: public
+            roles: PUBLIC
+            privs: ALL
+            state: absent
+
+        - name: Grant only application privileges
+          community.postgresql.postgresql_privs:
+            db: ml_predictions
+            type: "{{ item.type }}"
+            objs: "{{ item.obj }}"
+            roles: ml_app
+            privs: "{{ item.privs }}"
+          loop:
+            - {type: database, obj: ml_predictions, privs: CONNECT}
+            - {type: schema, obj: public, privs: USAGE}
+            - {type: table, obj: predictions, privs: "SELECT,INSERT"}
+            - {type: sequence, obj: predictions_id_seq, privs: "USAGE,SELECT"}
+
+  handlers:
+    - name: Restart database cluster
+      ansible.builtin.service:
+        name: postgresql@14-main
+        state: restarted

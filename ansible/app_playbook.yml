@@ -1,0 +1,104 @@
+---
+- name: Deploy the Diabetes service on the new application server
+  hosts: app
+  gather_facts: false
+
+  vars:
+    image_sha: "{{ lookup('env', 'LAB6_SHA') }}"
+    db_password: "{{ lookup('env', 'LAB6_DB_PASSWORD') }}"
+    registry_token: "{{ lookup('env', 'LAB6_GHCR_TOKEN') }}"
+    db_ip: "{{ hostvars[groups['db'][0]].ansible_host }}"
+    image_name: "ghcr.io/karpovammm/ml-prediction-service/ml-app"
+    deploy_dir: /opt/ml-lab6
+    source_dir: "/opt/ml-lab6/releases/{{ image_sha }}"
+    source_archive: "{{ lookup('env', 'HOME') }}/.config/ml-lab6/source-{{ image_sha }}.tar.gz"
+
+  tasks:
+    - name: Check deployment parameters
+      ansible.builtin.assert:
+        that:
+          - image_sha is match('^[0-9a-f]{40}$')
+          - db_password | length > 0
+        fail_msg: "Set LAB6_SHA and LAB6_DB_PASSWORD on the controller."
+      no_log: true
+
+    - name: Install Docker and the Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+          - python3-requests
+          - ca-certificates
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Enable and start Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create deployment and release directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ deploy_dir }}"
+        - "{{ source_dir }}"
+
+    - name: Check whether the source revision was fully extracted
+      ansible.builtin.stat:
+        path: "{{ source_dir }}/.lab6-complete"
+      register: release_marker
+
+    - name: Install the selected source revision
+      when: not release_marker.stat.exists
+      block:
+        - name: Extract project sources from the controller
+          ansible.builtin.unarchive:
+            src: "{{ source_archive }}"
+            dest: "{{ source_dir }}"
+
+        - name: Mark the completed release
+          ansible.builtin.copy:
+            dest: "{{ source_dir }}/.lab6-complete"
+            content: "{{ image_sha }}\n"
+            mode: "0644"
+
+    - name: Copy the Compose configuration
+      ansible.builtin.copy:
+        src: compose.lab6.yml
+        dest: "{{ deploy_dir }}/compose.yaml"
+        mode: "0644"
+
+    - name: Set application environment
+      ansible.builtin.copy:
+        dest: "{{ deploy_dir }}/.env"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          LAB6_IMAGE={{ image_name }}:{{ image_sha }}
+          DB_HOST={{ db_ip }}
+          DB_PASSWORD={{ db_password }}
+      no_log: true
+
+    - name: Log in to GHCR for a private package
+      community.docker.docker_login:
+        registry_url: ghcr.io
+        username: karpovammm
+        password: "{{ registry_token }}"
+      when: registry_token | length > 0
+      no_log: true
+
+    - name: Start the selected version and wait for health
+      community.docker.docker_compose_v2:
+        project_src: "{{ deploy_dir }}"
+        project_name: ml-lab6
+        state: present
+        pull: missing
+        build: never
+        wait: true
+        wait_timeout: 180
